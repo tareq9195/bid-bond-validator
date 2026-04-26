@@ -1,10 +1,11 @@
 import os
-import fitz
+import base64
 from flask import Flask, request, jsonify, render_template_string
-from groq import Groq
+import google.generativeai as genai
 
 app = Flask(__name__)
-client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+model = genai.GenerativeModel("gemini-2.0-flash")
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -91,9 +92,9 @@ async function process() {
 """
 
 SYSTEM_PROMPT = """You are a Senior Legal and Compliance Advisor for PetroChina Halfaya FZCO Iraq Branch.
-Analyze the Bid Bond text and verify it against the tender requirements.
+Analyze the attached Bid Bond PDF and verify it against the tender requirements.
 Output ONLY an HTML table with columns: Criterion | Status | Finding.
-Use: GREEN, YELLOW, or RED for status.
+Use colored cells: GREEN, YELLOW, or RED for status column.
 
 Check these 7 criteria:
 1. Tender Name and Number - must match exactly (GREEN or RED only)
@@ -117,30 +118,20 @@ def handle():
     if not f:
         return jsonify({"error": "لم يتم رفع أي ملف"}), 400
     try:
-        pdf_bytes = f.read()
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        pdf_text = ""
-        for page in doc:
-            pdf_text += page.get_text()
-        doc.close()
-        if not pdf_text.strip():
-            return jsonify({"error": "لم يتم العثور على نص في الملف"}), 400
+        pdf_b64 = base64.b64encode(f.read()).decode('utf-8')
         user_prompt = (
             f"Tender No: {request.form.get('tNum')}\n"
             f"Tender Name: {request.form.get('tName')}\n"
             f"Required Bid Bond Amount: {request.form.get('bAmount')} USD\n"
             f"Bid Closing Date: {request.form.get('cDate')}\n\n"
-            f"Bid Bond Text:\n{pdf_text[:4000]}"
+            f"Please analyze the attached PDF bid bond against these requirements."
         )
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt}
-            ],
-            max_tokens=1500
-        )
-        return jsonify({"report": response.choices[0].message.content})
+        response = model.generate_content([
+            SYSTEM_PROMPT,
+            user_prompt,
+            {"mime_type": "application/pdf", "data": pdf_b64}
+        ])
+        return jsonify({"report": response.text})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
