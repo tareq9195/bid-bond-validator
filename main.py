@@ -169,7 +169,7 @@ def handle():
         return jsonify({"report": report})
     
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e), "detail": str(result) if "result" in dir() else "no result"}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
