@@ -1,11 +1,13 @@
 import os
 import base64
+import fitz
+import requests
 from flask import Flask, request, jsonify, render_template_string
-import google.generativeai as genai
+from PIL import Image
+import io
 
 app = Flask(__name__)
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-2.0-flash")
+NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY")
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -92,9 +94,9 @@ async function process() {
 """
 
 SYSTEM_PROMPT = """You are a Senior Legal and Compliance Advisor for PetroChina Halfaya FZCO Iraq Branch.
-Analyze the attached Bid Bond PDF and verify it against the tender requirements.
+Analyze the Bid Bond image and verify it against the tender requirements.
 Output ONLY an HTML table with columns: Criterion | Status | Finding.
-Use colored cells: GREEN, YELLOW, or RED for status column.
+Use: GREEN, YELLOW, or RED for status.
 
 Check these 7 criteria:
 1. Tender Name and Number - must match exactly (GREEN or RED only)
@@ -110,6 +112,18 @@ After the table add: <b>Overall Result: PASS / CONDITIONAL / FAIL</b>
 Then: <b>Legal Risk Note:</b> one sentence.
 """
 
+def pdf_to_base64_images(pdf_bytes):
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    images = []
+    for page in doc:
+        mat = fitz.Matrix(2, 2)
+        pix = page.get_pixmap(matrix=mat)
+        img_bytes = pix.tobytes("jpeg")
+        img_b64 = base64.b64encode(img_bytes).decode('utf-8')
+        images.append(img_b64)
+    doc.close()
+    return images
+
 @app.route("/", methods=["GET", "POST"])
 def handle():
     if request.method == "GET":
@@ -118,20 +132,42 @@ def handle():
     if not f:
         return jsonify({"error": "لم يتم رفع أي ملف"}), 400
     try:
-        pdf_b64 = base64.b64encode(f.read()).decode('utf-8')
+        pdf_bytes = f.read()
+        images = pdf_to_base64_images(pdf_bytes)
+        
         user_prompt = (
             f"Tender No: {request.form.get('tNum')}\n"
             f"Tender Name: {request.form.get('tName')}\n"
             f"Required Bid Bond Amount: {request.form.get('bAmount')} USD\n"
             f"Bid Closing Date: {request.form.get('cDate')}\n\n"
-            f"Please analyze the attached PDF bid bond against these requirements."
+            f"Analyze the attached Bid Bond images."
         )
-        response = model.generate_content([
-            SYSTEM_PROMPT,
-            user_prompt,
-            {"mime_type": "application/pdf", "data": pdf_b64}
-        ])
-        return jsonify({"report": response.text})
+
+        content = [{"type": "text", "text": SYSTEM_PROMPT + "\n\n" + user_prompt}]
+        for img_b64 in images:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}
+            })
+
+        response = requests.post(
+            "https://integrate.api.nvidia.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {NVIDIA_API_KEY}",
+                "Accept": "application/json"
+            },
+            json={
+                "model": "meta/llama-3.2-11b-vision-instruct",
+                "messages": [{"role": "user", "content": content}],
+                "max_tokens": 1500,
+                "temperature": 0.1
+            }
+        )
+        
+        result = response.json()
+        report = result["choices"][0]["message"]["content"]
+        return jsonify({"report": report})
+    
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
